@@ -1,0 +1,429 @@
+---
+title: "Lab 2 - Describing the Relationship Between SES and Factors Associated with Poverty and Rates of Drug Overdose Related Deaths Across U.S Counties"
+author: "Grace Suh, Randell Smith, Tarun Yeddula" 
+date: today 
+date-format: short 
+format: 
+  pdf: 
+    documentclass: scrartcl
+    classoption: onecolumn
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, message=FALSE)
+```
+
+```{r package loads, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message=FALSE)
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(base)
+library(stats)
+library(sandwich)
+install.packages('car')
+library(car)
+library(stargazer)
+library(httr)
+library(readxl)
+
+knitr::opts_chunk$set(message=FALSE)
+theme_set(theme_minimal())
+```
+
+```{r, warning=FALSE}
+url <- "https://www.ahrq.gov/sites/default/files/wysiwyg/sdoh/SDOH_2020_COUNTY_1_0.xlsx"
+
+# download ONCE
+res <- httr::GET(
+  url,
+  httr::add_headers(
+    `User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0 Safari/537.36",
+    Referer = "https://www.ahrq.gov/sdoh/data-analytics/sdoh-data.html"
+  )
+)
+stop_for_status(res)
+
+tmp <- tempfile(fileext = ".xlsx")
+writeBin(content(res, "raw"), tmp)
+
+# read both sheets
+sdoh_data   <- read_excel(tmp, sheet = "Data")
+sdoh_layout <- read_excel(tmp, sheet = "Layout")
+
+unlink(tmp)
+
+# ---- data wrangling for lab ----
+analysis <- sdoh_data %>%
+  transmute(
+    state                       = STATE,
+    county                      = COUNTY,
+    income_less_10k             = as.numeric(ACS_PCT_HH_INC_10000),
+    income_10k_15k              = as.numeric(ACS_PCT_HH_INC_14999),
+    income_15k_25k              = as.numeric(ACS_PCT_HH_INC_24999),
+    income_25k_50k              = as.numeric(ACS_PCT_HH_INC_49999),
+    income_50k_100k             = as.numeric(ACS_PCT_HH_INC_99999),
+    income_greater_100k         = as.numeric(ACS_PCT_HH_INC_100000),
+    drug_death_rate             = as.numeric(CDCW_DRUG_DTH_RATE),
+    poverty_rate                = as.numeric(SAIPE_PCT_POV),
+    snap_poverty_households     = as.numeric(ACS_PCT_HH_FOOD_STMP_BLW_POV),
+    unemployment_rate           = as.numeric(ACS_PCT_UNEMPLOY),
+    uninsured_rate              = as.numeric(ACS_PCT_UNINSURED),
+    income_inequality_index     = as.numeric(ACS_GINI_INDEX),
+    median_household_income     = as.numeric(ACS_MEDIAN_HH_INC),
+    long_commute_share          = as.numeric(ACS_PCT_COMMT_60MINUP),
+    mental_health_provider_rate = as.numeric(CHR_MENTAL_PROV_RATE)
+  ) %>%
+  filter(
+    !is.na(poverty_rate),
+    !is.na(drug_death_rate)
+  )
+
+size <- floor(0.3 * nrow(analysis))
+ind <-sample(seq_len(nrow(analysis)), size=size)
+exploration <- analysis[ind,]
+confirmation <- analysis[-ind,]
+```
+
+## Introduction
+
+Across the United States, drug overdose mortality tells two very different stories. In some counties, overdose deaths occur at rates so high that they shape housing systems, health departments, and even local economies. In others, the issue remains comparatively distant. These disparities are not random; they map onto differences in local economic conditions, service capacity, and resource access at the county level. Understanding this variation requires looking beyond individual behavior and toward the broader material and economic conditions that shape daily life. County-level socioeconomic status (SES) can be observed in several straightforward indicators, including unemployment levels, insurance gaps, and other limits on economic security. These measures are not meant to imply hidden mechanisms but simply describe the material conditions counties operate within. While prior research has noted socioeconomic gradients in a range of health outcomes, national patterns specific to overdose mortality remain less descriptively clear. Our aim is to describe how overdose mortality varies across counties with different economic profiles using the 2020 Social Determinants of Health (SDOH) dataset.
+
+This descriptive focus guides the rest of the analysis. Rather than attempting to explain why overdoses are concentrated where they are, we use the SDOH dataset to examine how consistently overdose mortality aligns with observable county-level economic conditions. The goal is not to resolve mechanisms or isolate SES as a singular driving force, but to provide a clearer national portrait of how overdose loss distributes itself across communities with differing access to treatment capacity, economic stability, and institutional support. By clarifying where overdose mortality is most heavily concentrated across the socioeconomic landscape, we can better understand the scope of variation that public health systems must navigate, even without making causal claims.
+
+## Data
+
+We used the 2020 Social Determinants of Health (SDOH) County File which was compiled by the Agency for Healthcare Research and Quality (AHRQ). This dataset provides a standardized set of socioeconomic and health indicators and kpis for all U.S. counties. Using the AHRQ public repository, we imported the “Data” sheet and restricted our analysis to variables that we felt were relevant to socioeconomic status, which includes household income across 6 bands, unemployment, uninsured rates, and mental health provider availability. We converted percentage fields to numeric, removed counties missing values for either overdose mortality or poverty, and constructed a clean analytical dataset of approximately 2,200 counties. As a baseline, we produced histograms of drug overdose death rates (Figure 1) and Each Income-Share variable (Figure 2). These distributions show substantial right-skew in overdose mortality and approximately normal or mild skew distributions across income bands, supporting the use of Linear Regression Models.
+
+```{r}
+#| warning: false
+#| fig-height: 4
+#| fig-width: 7
+#| fig-cap: "Histogram illustrating the distribution of drug overdose death rates per 100,000 residents across U.S. counties. The distribution is right-skewed, with most counties experiencing relatively low overdose mortality rates and a long tail representing a smaller number of counties with substantially higher rates."
+
+
+p1 <- ggplot(analysis, aes(x = drug_death_rate)) +
+  geom_histogram(bins = 40, color = "white", fill = "#2C7BB6") +
+  labs(
+    title = "Distribution of Drug Overdose Death Rates",
+    x = "Drug Overdose Deaths per 100,000",
+    y = "Count of Counties",
+  ) +
+  theme(
+    plot.caption = element_text(hjust = 0.5, face = "bold"),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+p1
+
+```
+
+```{r}
+#| warning: false
+#| fig-height: 4
+#| fig-width: 7
+#| fig-cap: "Histograms showing the distribution of income share variables across U.S. counties. Lower-income brackets (<$10k, $10k–$15k, and $15k–$25k) exhibit right-skewed distributions with most counties having relatively small shares of households in these ranges. Middle-income brackets ($25k–$50k and $50k–$100k) are more symmetric and concentrated around their respective modal values, while the highest-income bracket (>$100k) again demonstrates right skewness"
+
+fill_color <- "#1C91C0"
+
+p_inc1 <- ggplot(analysis, aes(x = income_less_10k)) +
+  geom_histogram(bins = 40, color = "white", fill = fill_color) +
+  labs(x = "<$10k Income Share (%)", y = "Count") +
+  theme(axis.title = element_text(face = "bold"))
+
+p_inc2 <- ggplot(analysis, aes(x = income_10k_15k)) +
+  geom_histogram(bins = 40, color = "white", fill = fill_color) +
+  labs(x = "$10k–$15k Income Share (%)", y = "Count") +
+  theme(axis.title = element_text(face = "bold"))
+
+p_inc3 <- ggplot(analysis, aes(x = income_15k_25k)) +
+  geom_histogram(bins = 40, color = "white", fill = fill_color) +
+  labs(x = "$15k–$25k Income Share (%)", y = "Count") +
+  theme(axis.title = element_text(face = "bold"))
+
+p_inc4 <- ggplot(analysis, aes(x = income_25k_50k)) +
+  geom_histogram(bins = 40, color = "white", fill = fill_color) +
+  labs(x = "$25k–$50k Income Share (%)", y = "Count") +
+  theme(axis.title = element_text(face = "bold"))
+
+p_inc5 <- ggplot(analysis, aes(x = income_50k_100k)) +
+  geom_histogram(bins = 40, color = "white", fill = fill_color) +
+  labs(x = "$50k–$100k Income Share (%)", y = "Count") +
+  theme(axis.title = element_text(face = "bold"))
+
+p_inc6 <- ggplot(analysis, aes(x = income_greater_100k)) +
+  geom_histogram(bins = 40, color = "white", fill = fill_color) +
+  labs(x = ">$100k Income Share (%)", y = "Count") +
+  theme(axis.title = element_text(face = "bold"))
+
+p_grid <- (
+  (p_inc1 | p_inc2 | p_inc3) /
+  (p_inc4 | p_inc5 | p_inc6)
+) +
+  plot_annotation(
+    title = "Distribution of Income Share Variables Across U.S. Counties",
+    caption = "Figure 2",
+    theme = theme(
+      plot.title = element_text(hjust = 0.5),
+      plot.caption = element_text(hjust = 0.5, face = "bold")
+    )
+  )
+
+p_grid
+```
+
+```{r}
+#| warning: false
+#| fig-height: 6
+#| fig-width: 8
+#| fig-cap: "Scatterplots showing the relationship between drug overdose death rates and county-level income shares across six household income brackets. Overdose rates appear to be positively correlated in counties with larger proportions of lower- and middle-income households, while no clear pattern is observed for the highest-income group."
+
+plot1 <- ggplot(analysis, aes(x=income_less_10k, y=drug_death_rate)) +
+  geom_point() +
+  labs(
+    x='% of Population Income <$10k',
+    y='Drug Death Rate',
+  ) +
+  theme(axis.title.y = element_text(size = 7))
+
+plot2 <- ggplot(analysis, aes(x=income_10k_15k, y=drug_death_rate)) +
+  geom_point() +
+  labs(
+    x='% of Population Income $10k-$15k',
+    y='Drug Death Rate',
+  ) +
+  theme(axis.title.y = element_text(size = 7))
+
+plot3 <- ggplot(analysis, aes(x=income_15k_25k, y=drug_death_rate)) +
+  geom_point() +
+  labs(
+    x='% of Population Income $15k-$25k',
+    y='Drug Death Rate',
+  ) +
+  theme(axis.title.y = element_text(size = 7))
+
+plot4 <- ggplot(analysis, aes(x=income_25k_50k, y=drug_death_rate)) +
+  geom_point() +
+  labs(
+    x='% of Population Income $25k-$50k',
+    y='Drug Death Rate',
+  ) +
+  theme(axis.title.y = element_text(size = 7))
+
+plot5 <- ggplot(analysis, aes(x=income_50k_100k, y=drug_death_rate)) +
+  geom_point() +
+  labs(
+    x='% of Population Income $50k-$100k',
+    y='Drug Death Rate',
+  ) +
+  theme(axis.title.y = element_text(size = 7))
+
+
+plot6 <- ggplot(analysis, aes(x=income_greater_100k, y=drug_death_rate)) +
+  geom_point() +
+  labs(
+    x='% of Population Income >$100k',
+    y='Drug Death Rate',
+  ) +
+  theme(axis.title.y = element_text(size = 7))
+
+
+((plot1 | plot2) /
+(plot3 | plot4) /
+(plot5 | plot6)) +
+  plot_annotation(
+    title = "Drug Overdose Death Rates and Population Percentages of Different Income Groups"
+  ) &
+  theme(
+    plot.margin = margin(15, 15, 15, 15),
+    panel.spacing = unit(2, "lines"),
+    plot.title = element_text(size = 12)
+  )
+```
+
+```{r}
+model <- lm(drug_death_rate ~  income_10k_15k + income_15k_25k + income_25k_50k + income_50k_100k 
+            + income_greater_100k, data=analysis, na.action = na.exclude)
+```
+```{r}
+linearHypothesis(model2,
+                 c("income_10k_15k = 0",
+                   "income_15k_25k = 0",
+                   "income_25k_50k = 0",
+                   "income_50k_100k = 0",
+                   "income_greater_100k = 0",
+                   "unemployment_rate = 0",
+                   "uninsured_rate = 0",
+                   "mental_health_provider_rate = 0"))
+
+
+
+```
+```{r}
+#| warning: false
+#| fig-height: 6
+#| fig-width: 8
+#| fig-cap: "The relationship between drug overdose death rates and additional socioeconomic and health-related covariates. Higher overdose rates are generally observed in counties with higher unemployment and uninsured rates, while no clear pattern emerges with mental health provider availability."
+
+plot7 <- ggplot(analysis, aes(x=unemployment_rate, y=drug_death_rate)) +
+  geom_point() +
+  labs(
+    x='Unemployment Rate',
+    y='Drug Death Rate',
+  )
+
+plot8 <- ggplot(analysis, aes(x=uninsured_rate, y=drug_death_rate)) +
+  geom_point() + 
+  labs(
+    x='Uninsured Rate',
+    y='Drug Death Rate',
+  )
+
+plot9 <- ggplot(analysis, aes(x=mental_health_provider_rate, y=drug_death_rate)) +
+  geom_point() +
+  labs(
+    x='Mental Health Provider Rate',
+    y='Drug Death Rate',
+  )
+
+(plot7 | plot8)/(plot9) +
+  plot_annotation(
+    title = "Drug Overdose Death Rates and Expanded Model Covariates"
+  )
+```
+
+```{r}
+model2 <- lm(drug_death_rate ~ income_10k_15k + income_15k_25k + 
+    income_25k_50k + income_50k_100k + income_greater_100k + unemployment_rate + uninsured_rate +  
+               mental_health_provider_rate, data=analysis, na.action = na.exclude)
+```
+
+## Model Specification & Assumptions
+
+The primary regression model of this study tests the strength of the relationship between a county's composition of shares of various income bands and drug overdose death rates. Since the dataset records percentages of income bands ranging from less than \$10,000 to over \$100,000, these are ratio variables that will yield perfect collinearity if all bands are included in the model. To further verify the optimal form of the model, simple EDA was conducted examining the distribution of percentage of household income across the six bands against drug overdose death rates to determine if variable transformations would be required. Figure 3 indicates that linear terms for all variables would be sufficient. The final primary model was as followed:
+
+$$
+\hat{y}_i = \hat{\beta}_0 
++ \hat{\beta}_1 X_{15k,i}
++ \hat{\beta}_2 X_{25k,i}
++ \hat{\beta}_3 X_{50k,i}
++ \hat{\beta}_4 X_{100k,i}
++ \hat{\beta}_5 X_{>100k,i}
++ \epsilon_i
+$$ Such that the indicator variables (with $X_{<15k,i}$ as baseline) included are:
+
+-   $X_{15k,i}$ = Percentage of population with household income between \$10,000 and \$14,999\
+
+-   $X_{25k,i}$ = Percentage of population with household income between \$15,000 and \$24,999\
+
+-   $X_{50k,i}$ = Percentage of population with household income between \$25,000 and \$49,999\
+
+-   $X_{100k,i}$ = Percentage of population with household income between \$50,000 and \$99,999\
+
+-   $X_{>100k,i}$ = Percentage of population with household income greater than \$100,00
+
+This model performed satisfactorily in terms of it's ability to explain the variance of drug overdose death rates ($R^2$=0.033) since income is only a narrow facet of risk factors associated with drug use. The model suggests that counties with higher proportions of households with incomes above \$10,000 experience lower drug overdose death rates. Our second model sought to include more variables associated with SES and that could further describe drug overdose death rate variance. The expanded model was as followed: $$
+\hat{y}_i = \hat{\beta}_0 
++ \hat{\beta}_1 X_{15k,i}
++ \hat{\beta}_2 X_{25k,i}
++ \hat{\beta}_3 X_{50k,i}
++ \hat{\beta}_4 X_{100k,i}
++ \hat{\beta}_5 X_{>100k,i}
++ \hat{\beta}_6 X_{Unemploy,i}
++ \hat{\beta}_7 X_{Unins,i}
++ \hat{\beta}_8 X_{Prov,i}
++ \epsilon_i
+$$
+
+-   $X_{Unemploy,i}$ = Percentage of labor force that is unemployed\
+-   $X_{Unins,i}$ = Percentage of population with no health insurance coverage\
+-   $X_{Prov,i}$ = Mental health care providers per 100,000 population
+
+The these variables were not transformed for similar reasons mentioned for the primary model as the distribution of all three against the dependent variable suggested linear terms were sufficient (Figure 4). In comparison to the base, the expanded model performed better as it yielded a more favorable $R^2$=0.133.
+
+In order for both models to be valid, data must be IID. Independence is not upheld due to strong geographic clustering as the data set includes all counties within the U.S which counties within the same state or region will often share similar environments (i.e. political, social, and economic) that will bias our variables. The lack of independence will reduce our ability to extract information from the county-level due to geographic clustering. In terms of identical distribution, this is upheld since each county comes from the same population distribution of being within the U.S. While IID is not upheld due to the violation of independence, our model can still provide utility when paired with robust standard errors to enable us to make inferences. In terms of unique BLP, this assumption is upheld as our regression results indicate the lack of perfect collinearity and because all of our variables have finite means and variance. Our variables are population percentages which must be bounded between 0-100 and cannot grow infinitely in variance with unbounded support.
+
+```{r, results='asis', warning=FALSE}
+stargazer(model, model2,
+          type = "latex",
+          title = "Regression Models of Drug Overdose Death Rates per 100,000 Population",
+          dep.var.labels = "Drug Overdose Death Rate",
+          column.labels = c("Base Model", "Expanded Model"),
+          covariate.labels = c(
+            "Household Income Percentage: 10k--15k",
+            "Household Income Percentage: 15k--25k",
+            "Household Income Percentage: 25k--50k",
+            "Household Income Percentage: 50k--100k",
+            "Household Income Percentage: >100k",
+            "Unemployment Rate (\\%)",
+            "Uninsured Rate (\\%)",
+            "Mental Health Providers per 100{,}000"
+          ),
+          header = FALSE)
+```
+
+## Results
+
+In the base model, the coefficients for all income bands except for 15k-25k were found to be statistically significant (Table 1). However, once the model accounted for unemployment, insurance levels, and mental health provider access rates, the coefficient for 10k-15k is no longer significant while the three additional predictors and income bands ranging from 25k to +100k remained significant. The base model experienced a form of omitted variables bias where the low income band appears significant since it is likely highly correlated with poorer outcomes such as higher unemployment and lower insurance coverage which will more directly impact drug overdose rates. Once the expanded model accounts for these omitted variables and decouples it from the 10-15k variable, this income band loses explanatory power.
+
+The regression results of the expanded model indicate that a 10% increase in county shares of 25k-50k, 50k-100k, and \>100k leads to 3.6, 3.6, and 5 fewer deaths per 100,000 respectively holding all other variables constant (Table 1). For every percent increase in unemployment, it is associated with increase in deaths by 1 while, every percent increase in uninsured rates lead to 0.7 decrease in deaths. This negative association may reflect structural differences in healthcare access where counties with higher uninsured populations may have fewer medical providers and lower exposure to opioids. Lastly, although the coefficient for mental health provider density is statistically significant, the effect size is negligible. A 100-provider increase per 100,000 residents is associated with only a 0.5-point change in overdose deaths, a magnitude unlikely to be meaningful in practical terms.
+
+## Conclusion
+
+Across U.S. counties, overdose mortality aligns with meaningful, if modest, socioeconomic patterns. In both the base and expanded models, counties with larger shares of higher-income households consistently reported lower overdose death rates, while those facing greater economic constraint showed elevated mortality levels. These results do not indicate a singular pathway or fully account for the drivers of overdose risk, but they do clarify how uneven overdose loss is distributed across the national socioeconomic landscape. The expanded model, which incorporated unemployment, uninsured rates, and mental health provider capacity, strengthened explanatory power relative to the income-only specification, suggesting that county-level institutional and economic supports matter alongside income composition itself. As noted in the model discussion, overall explanatory strength remained limited, which is expected given that overdose vulnerability extends beyond economic structure alone. Geographic clustering also indicates shared regional environments, underscoring that counties do not experience these conditions in isolation.
+
+Taken together, the models offer a clearer descriptive portrait rather than a definitive explanation: overdose burden concentrates more heavily in counties with fewer economic and institutional resources, and more lightly where those supports are stronger. Even without establishing causality, documenting these disparities allows public health work to begin with a grounded sense of where the burden is highest and what structural contexts accompany it. In this sense, the analysis contributes a map that traces how overdose mortality distributes itself across widely different local capacities, and clarifies the uneven terrain that national response efforts must navigate.
+
+# Appendix
+
+## Data Source
+
+[**Social Determinants of Health Database by Agency for Healthcare Research and Quality - 2020 County Level Dataset**](https://www.ahrq.gov/sdoh/data-analytics/sdoh-data.html#download)
+
+## Source Code
+[**Lab 2 Markdown**](https://github.com/gyjs00/lab_2/blob/main/prompt/lab2.qmd)
+
+## Residuals-vs-Fitted-Values Plot
+
+```{r, warning=FALSE,}
+#| warning: false
+#| fig-height: 3
+#| fig-width: 10
+#| fig-cap: "Residual plots for the base and expanded models. The expanded model shows a slight curvature in residuals across predicted values but is largely captured by the model."
+
+analysis <-analysis %>% 
+  mutate(
+    predict = predict(model),
+    resid = resid(model)
+  )
+
+analysis2 <- analysis %>% 
+  mutate(
+    predict2 = predict(model2),
+    resid2 = resid(model2)
+  )
+
+
+plot10 <- ggplot(analysis, aes(x=predict, y=resid)) +
+  geom_point() + stat_smooth()   +
+  labs(
+    title = "Base Model",
+    x='Predicted',
+    y='Residuals',
+  )
+
+plot11 <- ggplot(analysis2, aes(x=predict2, y=resid2)) +
+  geom_point() + stat_smooth()  +
+  labs(
+    title = "Expanded Model",
+    x='Predicted',
+    y='Residuals',
+  )
+
+
+(plot10 | plot11)
+```
